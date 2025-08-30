@@ -8,7 +8,8 @@ import HospitalRouter from './routes/Hospital.router.js';
 import router from './routes/Admin.router.js';
 import brouter from './routes/Bloodstock.js';
 import authRouter from './routes/authLogin.js';
-
+import campRouter from './routes/Campaings.router.js'
+import requestRouter from './routes/Request.router.js'
 dotenv.config()
 const app = express();
 
@@ -25,7 +26,9 @@ app.use("/api/donor",DonorRouter);
 app.use("/api/hospital",HospitalRouter);
 app.use("/api/admin",router);
 app.use("/api/bloodstock",brouter);
-app.use("/api",authRouter)
+app.use("/api",authRouter);
+app.use("/api/camps",campRouter);
+app.use("/api/requests",requestRouter);
 app.listen(port,()=>{
     connectDB();
     console.log(`Server Running on http://localhost:${port}`);

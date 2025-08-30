@@ -10,7 +10,6 @@ import {
   getBloodStockSummary,
   getUnits,
 } from "../controllers/Bloodstock.controller.js";
-import { protect } from "../middleware/protect.js";
 
 
 const brouter = Router();
@@ -29,5 +28,5 @@ brouter.patch("/:stockId/batches/:batchId",updateBloodBatch);
 // Delete batch or entire stock
 brouter.delete("/:stockId/batches/:batchId",deleteBloodBatch);
 brouter.delete("/:id",deleteBloodStock);
-brouter.get("/units",protect(["hospital"]), getUnits);
+brouter.get("/units", getUnits);
 export default brouter;
