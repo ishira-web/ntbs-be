@@ -5,6 +5,7 @@ import {
   getDonorById,
   updateDonorById,
   deleteDonorById,
+  acceptDonor,
 } from "../controllers/Donor.controller.js";
 
 const DonorRouter = express.Router();
@@ -23,5 +24,7 @@ DonorRouter.patch("/:id", updateDonorById);
 
 // Delete donor: typically admin only
 DonorRouter.delete("/:id", deleteDonorById);
+
+DonorRouter.patch("/:id/accept",acceptDonor);
 
 export default DonorRouter;

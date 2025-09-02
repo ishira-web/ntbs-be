@@ -1,7 +1,8 @@
 // server/controllers/donorController.js
 import Donor from "../models/Donor.js";
-import Hospital from "../models/Hospital.js"; 
-import bcrypt from 'bcrypt'
+import Hospital from "../models/Hospital.js";
+import bcrypt from "bcrypt";
+
 const sanitize = (doc) => {
   if (!doc) return doc;
   const obj = doc.toObject ? doc.toObject() : { ...doc };
@@ -9,7 +10,7 @@ const sanitize = (doc) => {
 };
 
 // POST /api/donors
-// Roles: donor (self-register), hospital/admin (register on behalf)
+// Always create with confirmation.status = "Pending"
 export const createDonor = async (req, res) => {
   try {
     const {
@@ -17,35 +18,44 @@ export const createDonor = async (req, res) => {
       nic,
       email,
       phone,
-      dateOfBirth,  
-      gender,       
-      bloodGroup,   
+      dateOfBirth,
+      gender,
+      bloodGroup,
       weightKg,
       addressLine1,
       city,
       district,
       password,
-      nearestHospitalId, 
+      nearestHospitalId,
       lastDonationDate,
       chronicIllness = false,
       medications = "",
       recentTattooMonths = 0,
     } = req.body;
 
-    // minimal required fields to create a donor
     if (
-      !name || !nic || !email || !phone || !dateOfBirth ||
-      !gender || !bloodGroup || !district || !nearestHospitalId || !weightKg
+      !name ||
+      !nic ||
+      !email ||
+      !phone ||
+      !dateOfBirth ||
+      !gender ||
+      !bloodGroup ||
+      !district ||
+      !nearestHospitalId ||
+      !weightKg ||
+      !password
     ) {
       return res.status(400).json({ message: "Missing required fields" });
     }
 
-    // (optional) ensure hospital exists
     const hospitalExists = await Hospital.exists({ _id: nearestHospitalId });
     if (!hospitalExists) {
       return res.status(400).json({ message: "nearestHospitalId is invalid" });
     }
-    const hashedPassword = await bcrypt.hash(password,10);
+
+    const hashedPassword = await bcrypt.hash(password, 10);
+
     const donor = new Donor({
       name,
       nic: String(nic).toUpperCase().trim(),
@@ -58,7 +68,7 @@ export const createDonor = async (req, res) => {
       addressLine1: addressLine1 || "",
       city: city || "",
       district,
-      password : hashedPassword,
+      password: hashedPassword,
       nearestHospitalId,
       medical: {
         lastDonationDate: lastDonationDate || null,
@@ -67,13 +77,19 @@ export const createDonor = async (req, res) => {
         recentTattooMonths: Number(recentTattooMonths || 0),
       },
       confirmation: {
-        status: "Pending",     // must be confirmed at hospital
+        status: "Pending",
         confirmedAt: null,
         confirmedByRole: null,
         confirmedById: null,
       },
       role: "donor",
     });
+
+    // 🔒 Force Pending even if someone tries to send confirmation in body
+    donor.confirmation.status = "Pending";
+    donor.confirmation.confirmedAt = null;
+    donor.confirmation.confirmedByRole = null;
+    donor.confirmation.confirmedById = null;
 
     const saved = await donor.save();
     return res.status(201).json({ message: "Donor created", donor: sanitize(saved) });
@@ -88,13 +104,11 @@ export const createDonor = async (req, res) => {
 };
 
 // GET /api/donors
-// Roles: admin, hospital
-// Query: q (name/nic/email), status (Pending|Confirmed|Rejected), bloodGroup, district, page, limit, sort
 export const listDonors = async (req, res) => {
   try {
     const {
       q,
-      status,          // Pending | Confirmed | Rejected
+      status, // Pending | Confirmed | Rejected
       bloodGroup,
       district,
       page = 1,
@@ -106,16 +120,9 @@ export const listDonors = async (req, res) => {
     if (status) filter["confirmation.status"] = status;
     if (bloodGroup) filter.bloodGroup = bloodGroup;
     if (district) filter.district = district;
-
-    // simple text-ish filter on key fields
     if (q) {
       const regex = new RegExp(q, "i");
-      filter.$or = [
-        { name: regex },
-        { nic: regex },
-        { email: regex },
-        { phone: regex },
-      ];
+      filter.$or = [{ name: regex }, { nic: regex }, { email: regex }, { phone: regex }];
     }
 
     const query = Donor.find(filter);
@@ -138,7 +145,6 @@ export const listDonors = async (req, res) => {
 };
 
 // GET /api/donors/:id
-// Roles: admin, hospital, donor(self) – enforce with your protect middleware (allowSelf)
 export const getDonorById = async (req, res) => {
   try {
     const { id } = req.params;
@@ -152,7 +158,7 @@ export const getDonorById = async (req, res) => {
 };
 
 // PATCH /api/donors/:id
-// Roles: donor(self) can update own demographics; hospital/admin can also update and confirm
+// Demographic/medical updates ONLY. Status changes must use acceptDonor().
 export const updateDonorById = async (req, res) => {
   try {
     const { id } = req.params;
@@ -172,10 +178,16 @@ export const updateDonorById = async (req, res) => {
       city,
       district,
       nearestHospitalId,
-      medical, // { lastDonationDate, chronicIllness, medications, recentTattooMonths }
-      // confirmation is controlled by hospital/admin only
-      confirmation, // { status }
+      medical,
+      confirmation, // 🚫 not allowed here anymore
     } = req.body;
+
+    // Block status edits here — enforce acceptDonor endpoint
+    if (confirmation !== undefined) {
+      return res
+        .status(400)
+        .json({ message: "Use /api/donors/:id/accept to update donor status" });
+    }
 
     if (name !== undefined) existing.name = name;
     if (nic !== undefined) existing.nic = String(nic).toUpperCase().trim();
@@ -188,39 +200,24 @@ export const updateDonorById = async (req, res) => {
     if (addressLine1 !== undefined) existing.addressLine1 = addressLine1;
     if (city !== undefined) existing.city = city;
     if (district !== undefined) existing.district = district;
+
     if (nearestHospitalId !== undefined) {
       const hospitalExists = await Hospital.exists({ _id: nearestHospitalId });
-      if (!hospitalExists) return res.status(400).json({ message: "nearestHospitalId is invalid" });
+      if (!hospitalExists) {
+        return res.status(400).json({ message: "nearestHospitalId is invalid" });
+      }
       existing.nearestHospitalId = nearestHospitalId;
     }
 
     if (medical !== undefined && typeof medical === "object") {
-      if (medical.lastDonationDate !== undefined) existing.medical.lastDonationDate = medical.lastDonationDate;
-      if (medical.chronicIllness !== undefined) existing.medical.chronicIllness = !!medical.chronicIllness;
-      if (medical.medications !== undefined) existing.medical.medications = medical.medications;
-      if (medical.recentTattooMonths !== undefined) existing.medical.recentTattooMonths = Number(medical.recentTattooMonths || 0);
-    }
-
-    // Confirmation: ONLY hospital/admin should be allowed to change this.
-    if (confirmation && confirmation.status) {
-      const requesterRole = req.user?.role; // relies on your protect middleware
-      if (!["admin", "hospital"].includes(requesterRole)) {
-        return res.status(403).json({ message: "Only hospital/admin can confirm donors" });
-      }
-      const newStatus = confirmation.status;
-      if (!["Pending", "Confirmed", "Rejected"].includes(newStatus)) {
-        return res.status(400).json({ message: "Invalid confirmation status" });
-      }
-      existing.confirmation.status = newStatus;
-      if (newStatus === "Confirmed" || newStatus === "Rejected") {
-        existing.confirmation.confirmedAt = new Date();
-        existing.confirmation.confirmedByRole = requesterRole;
-        existing.confirmation.confirmedById = req.user?.id || null;
-      } else {
-        existing.confirmation.confirmedAt = null;
-        existing.confirmation.confirmedByRole = null;
-        existing.confirmation.confirmedById = null;
-      }
+      if (medical.lastDonationDate !== undefined)
+        existing.medical.lastDonationDate = medical.lastDonationDate || null;
+      if (medical.chronicIllness !== undefined)
+        existing.medical.chronicIllness = !!medical.chronicIllness;
+      if (medical.medications !== undefined)
+        existing.medical.medications = medical.medications || "";
+      if (medical.recentTattooMonths !== undefined)
+        existing.medical.recentTattooMonths = Number(medical.recentTattooMonths || 0);
     }
 
     const saved = await existing.save();
@@ -236,7 +233,6 @@ export const updateDonorById = async (req, res) => {
 };
 
 // DELETE /api/donors/:id
-// Roles: admin (typical). If you want donors to self-delete, guard with protect(..., { allowSelf: true })
 export const deleteDonorById = async (req, res) => {
   try {
     const { id } = req.params;
@@ -249,8 +245,42 @@ export const deleteDonorById = async (req, res) => {
   }
 };
 
+// PATCH /api/donors/:id/accept
+// Only admin/hospital can set status to Confirmed or Rejected (from Pending).
+export const acceptDonor = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { status } = req.body || {};
 
-// Accept Donor
-export const acceptDonor = async(req,res)=>{
-  
-}
+
+    // Validate input
+    if (!["Confirmed", "Rejected"].includes(status)) {
+      return res
+        .status(400)
+        .json({ message: "status must be either 'Confirmed' or 'Rejected'" });
+    }
+
+    const donor = await Donor.findById(id);
+    if (!donor) return res.status(404).json({ message: "Donor not found" });
+
+    // Only allow transition from Pending
+    if (donor.confirmation.status !== "Pending") {
+      return res.status(409).json({
+        message: `Cannot change status from '${donor.confirmation.status}'. Only Pending donors can be confirmed/rejected.`,
+      });
+    }
+
+    donor.confirmation.status = status;
+    donor.confirmation.confirmedAt = new Date();
+    donor.confirmation.confirmedById = req.user?.id || null;
+
+    await donor.save();
+    return res.json({
+      message: `Donor ${status.toLowerCase()}`,
+      donor: sanitize(donor),
+    });
+  } catch (err) {
+    console.error("acceptDonor error:", err);
+    return res.status(500).json({ message: "Internal server error" });
+  }
+};
