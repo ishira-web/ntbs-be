@@ -19,6 +19,7 @@ const LocationSchema = new Schema(
     postalCode: { type: String, trim: true },
     lat: { type: Number }, // optional geo
     lng: { type: Number },
+    
   },
   { _id: false }
 );
