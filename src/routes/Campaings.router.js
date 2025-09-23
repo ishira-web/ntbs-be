@@ -1,28 +1,24 @@
-// server/routes/Camp.router.js
 import { Router } from "express";
 import {
-  createCamp,
-  listCamps,
-  getCampById,
-  updateCamp,
-  deleteCamp,
-  incrementMetrics,
+  createCampaign,
+  listCampaigns,
+  getCampaign,
+  updateCampaign,
+  deleteCampaign
 } from "../controllers/Campaings.controller.js";
+import { uploadCampaignPoster } from "../configs/multer-campaign.js";
 
-const crouter = Router();
+const router = Router();
 
-// Create
-crouter.post("/", createCamp);
+// Serve uploaded files (once, at app-level) – see app.js section below
+// app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 
-// List / search should come before param routes
-crouter.get("/", listCamps);
+router.get("/", listCampaigns);
+router.get("/:id", getCampaign);
 
-// Metrics helper (optional)
-crouter.patch("/:id/metrics", incrementMetrics);
+// Expect multipart/form-data with field `poster` for the image
+router.post("/", uploadCampaignPoster, createCampaign);
+router.put("/:id", uploadCampaignPoster, updateCampaign);
+router.delete("/:id", deleteCampaign);
 
-// Read / Update / Delete
-crouter.get("/:id", getCampById);
-crouter.patch("/:id", updateCamp);
-crouter.delete("/:id", deleteCamp);
-
-export default crouter;
+export default router;

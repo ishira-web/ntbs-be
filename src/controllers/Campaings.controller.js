@@ -1,249 +1,219 @@
-import mongoose from "mongoose";
-import Camp, { CAMP_STATUSES } from "../models/Campaing.js";
+import path from "path";
+import fs from "fs";
+import Campaign from "../models/Campaing.js";
 
-const isObjectId = (v) => mongoose.Types.ObjectId.isValid(v);
-
-const pick = (obj, keys) =>
-  keys.reduce((acc, k) => (obj[k] !== undefined ? ((acc[k] = obj[k]), acc) : acc), {});
-
-const campDTO = (doc) => {
-  if (!doc) return null;
-  const o = doc.toObject ? doc.toObject({ virtuals: true }) : { ...doc };
-  return {
-    _id: o._id,
-    hospitalId: o.hospitalId,
-    name: o.name,
-    organizer: o.organizer,
-    contact: o.contact,
-    status: o.status,
-    startAt: o.startAt,
-    endAt: o.endAt,
-    location: o.location,
-    expectedDonors: o.expectedDonors,
-    capacity: o.capacity,
-    metrics: o.metrics,
-    notes: o.notes,
-    createdAt: o.createdAt,
-    updatedAt: o.updatedAt,
-    isDeleted: o.isDeleted,
-  };
-};
-
-/* =========================
-   CREATE
-   ========================= */
-export const createCamp = async (req, res) => {
+// helper: delete file safely
+function safeUnlink(filePath) {
   try {
-    const body = req.body || {};
-    const required = ["hospitalId", "name", "startAt", "endAt"];
-    for (const k of required) {
-      if (!body[k]) return res.status(400).json({ message: `${k} is required` });
+    if (filePath && fs.existsSync(filePath)) {
+      fs.unlinkSync(filePath);
     }
-    if (!isObjectId(body.hospitalId)) {
-      return res.status(400).json({ message: "Invalid hospitalId" });
-    }
-    if (body.status && !CAMP_STATUSES.includes(body.status)) {
-      return res.status(400).json({ message: "Invalid status" });
-    }
-
-    const camp = new Camp({
-      hospitalId: body.hospitalId,
-      name: body.name,
-      organizer: body.organizer,
-      contact: body.contact,
-      status: body.status || "planned",
-      startAt: body.startAt,
-      endAt: body.endAt,
-      location: body.location,
-      expectedDonors: body.expectedDonors,
-      capacity: body.capacity,
-      metrics: body.metrics,
-      notes: body.notes,
-      createdBy: req.user?._id, // optional if you attach auth
-    });
-
-    await camp.save();
-    return res.status(201).json({ message: "Camp created", camp: campDTO(camp) });
-  } catch (err) {
-    console.error("createCamp error:", err);
-    return res.status(500).json({ message: "Internal server error" });
+  } catch (_) {
+    // ignore
   }
-};
+}
 
-/* =========================
-   LIST / SEARCH
-   ========================= */
-/**
- * Query params:
- *  - hospitalId? (ObjectId)
- *  - status? (planned|scheduled|ongoing|completed|cancelled)
- *  - q? (search in name/organizer/city/district)
- *  - from?, to? (ISO date strings for startAt range)
- *  - page=1, limit=10
- *  - sort="-startAt"
- *  - includeDeleted=false
- */
-export const listCamps = async (req, res) => {
+// helper: get relative path from multer absolute
+function toRelativePath(absPath) {
+  if (!absPath) return null;
+  const idx = absPath.lastIndexOf("uploads");
+  return idx >= 0 ? absPath.substring(idx).replaceAll("\\", "/") : absPath;
+}
+
+// helper: validate dates
+function assertDates(startAt, endAt) {
+  const start = new Date(startAt);
+  const end = new Date(endAt);
+  if (isNaN(start) || isNaN(end)) {
+    const err = new Error("Invalid dates supplied");
+    err.status = 400;
+    throw err;
+  }
+  if (start > end) {
+    const err = new Error("startAt cannot be after endAt");
+    err.status = 400;
+    throw err;
+  }
+}
+
+/* -------------------- create -------------------- */
+export async function createCampaign(req, res, next) {
   try {
     const {
-      hospitalId,
+      hospitalName,
+      title,
+      organization,
       status,
-      q,
-      from,
-      to,
+      startAt,
+      endAt,
+      venue,
+      locationUrl,
+    } = req.body;
+
+    if (!hospitalName || !title || !startAt || !endAt) {
+      return res
+        .status(400)
+        .json({ message: "hospitalName, title, startAt, endAt are required." });
+    }
+
+    assertDates(startAt, endAt);
+
+    const posterImg = toRelativePath(req.file?.path);
+
+    const doc = await Campaign.create({
+      hospitalName,
+      title: title?.trim(),
+      organization: organization?.trim(),
+      status,
+      startAt,
+      endAt,
+      venue: venue?.trim(),
+      posterImg,
+      locationUrl: locationUrl?.trim(),
+    });
+
+    res.status(201).json(doc);
+  } catch (err) {
+    if (req.file?.path) safeUnlink(req.file.path);
+    next(err);
+  }
+}
+
+/* -------------------- list -------------------- */
+export async function listCampaigns(req, res, next) {
+  try {
+    const {
       page = 1,
       limit = 10,
-      sort = "-startAt",
-      includeDeleted = "false",
+      q,
+      status,
+      from,
+      to,
+      sort = "-createdAt",
     } = req.query;
 
     const filter = {};
-    if (hospitalId) {
-      if (!isObjectId(hospitalId)) return res.status(400).json({ message: "Invalid hospitalId" });
-      filter.hospitalId = hospitalId;
-    }
-    if (status) {
-      if (!CAMP_STATUSES.includes(status)) {
-        return res.status(400).json({ message: "Invalid status" });
-      }
-      filter.status = status;
-    }
-    if (includeDeleted !== "true") filter.isDeleted = { $ne: true };
+    if (status) filter.status = status;
 
-    // date window on startAt
     if (from || to) {
-      filter.startAt = {};
-      if (from) filter.startAt.$gte = new Date(from);
-      if (to) filter.startAt.$lte = new Date(to);
+      filter.$and = [];
+      if (from) filter.$and.push({ startAt: { $gte: new Date(from) } });
+      if (to) filter.$and.push({ endAt: { $lte: new Date(to) } });
+      if (!filter.$and.length) delete filter.$and;
     }
 
-    // free-text search
     if (q) {
-      const regex = new RegExp(q.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
       filter.$or = [
-        { name: regex },
-        { organizer: regex },
-        { "location.city": regex },
-        { "location.district": regex },
+        { title: { $regex: q, $options: "i" } },
+        { organization: { $regex: q, $options: "i" } },
+        { venue: { $regex: q, $options: "i" } },
+        { hospitalName: { $regex: q, $options: "i" } },
       ];
     }
 
-    const cursor = Camp.find(filter);
-    const total = await Camp.countDocuments(cursor.getFilter());
-    const docs = await cursor
-      .sort(sort)
-      .skip((Number(page) - 1) * Number(limit))
-      .limit(Number(limit));
+    const pageNum = Math.max(parseInt(page, 10), 1);
+    const limitNum = Math.min(Math.max(parseInt(limit, 10), 1), 100);
 
-    return res.json({
+    const [items, total] = await Promise.all([
+      Campaign.find(filter)
+        .sort(sort)
+        .skip((pageNum - 1) * limitNum)
+        .limit(limitNum),
+      Campaign.countDocuments(filter),
+    ]);
+
+    res.json({
+      data: items,
+      page: pageNum,
+      limit: limitNum,
       total,
-      page: Number(page),
-      limit: Number(limit),
-      camps: docs.map(campDTO),
+      pages: Math.ceil(total / limitNum),
     });
   } catch (err) {
-    console.error("listCamps error:", err);
-    return res.status(500).json({ message: "Internal server error" });
+    next(err);
   }
-};
+}
 
-/* =========================
-   READ ONE
-   ========================= */
-export const getCampById = async (req, res) => {
+/* -------------------- get one -------------------- */
+export async function getCampaign(req, res, next) {
   try {
-    const { id } = req.params;
-    if (!isObjectId(id)) return res.status(400).json({ message: "Invalid id" });
-    const doc = await Camp.findById(id);
-    if (!doc || doc.isDeleted) return res.status(404).json({ message: "Camp not found" });
-    return res.json({ camp: campDTO(doc) });
+    const doc = await Campaign.findById(req.params.id);
+    if (!doc) return res.status(404).json({ message: "Campaign not found" });
+    res.json(doc);
   } catch (err) {
-    console.error("getCampById error:", err);
-    return res.status(500).json({ message: "Internal server error" });
+    next(err);
   }
-};
+}
 
-/* =========================
-   UPDATE
-   ========================= */
-export const updateCamp = async (req, res) => {
+/* -------------------- update -------------------- */
+export async function updateCampaign(req, res, next) {
   try {
     const { id } = req.params;
-    if (!isObjectId(id)) return res.status(400).json({ message: "Invalid id" });
+    const existing = await Campaign.findById(id);
+    if (!existing) return res.status(404).json({ message: "Campaign not found" });
 
-    const allowed = [
-      "name",
-      "organizer",
-      "contact",
-      "status",
-      "startAt",
-      "endAt",
-      "location",
-      "expectedDonors",
-      "capacity",
-      "metrics",
-      "notes",
-    ];
-    const patch = pick(req.body || {}, allowed);
+    const {
+      hospitalName,
+      title,
+      organization,
+      status,
+      startAt,
+      endAt,
+      venue,
+      locationUrl,
+    } = req.body;
 
-    if (patch.status && !CAMP_STATUSES.includes(patch.status)) {
-      return res.status(400).json({ message: "Invalid status" });
+    if (startAt || endAt) {
+      assertDates(startAt ?? existing.startAt, endAt ?? existing.endAt);
     }
 
-    const doc = await Camp.findById(id);
-    if (!doc || doc.isDeleted) return res.status(404).json({ message: "Camp not found" });
+    let newPosterRel = existing.posterImg;
+    let oldPosterAbs;
 
-    Object.assign(doc, patch, { updatedBy: req.user?._id });
-    await doc.save();
+    if (req.file?.path) {
+      newPosterRel = toRelativePath(req.file.path);
+      if (existing.posterImg) {
+        oldPosterAbs = path.resolve(process.cwd(), existing.posterImg);
+      }
+    }
 
-    return res.json({ message: "Camp updated", camp: campDTO(doc) });
+    existing.hospitalName = hospitalName ?? existing.hospitalName;
+    existing.title = title?.trim() ?? existing.title;
+    existing.organization = organization?.trim() ?? existing.organization;
+    if (status) existing.status = status;
+    existing.startAt = startAt ?? existing.startAt;
+    existing.endAt = endAt ?? existing.endAt;
+    existing.venue = venue?.trim() ?? existing.venue;
+    existing.locationUrl = locationUrl?.trim() ?? existing.locationUrl;
+    existing.posterImg = newPosterRel;
+
+    const saved = await existing.save();
+
+    if (oldPosterAbs) safeUnlink(oldPosterAbs);
+
+    res.json(saved);
   } catch (err) {
-    console.error("updateCamp error:", err);
-    return res.status(500).json({ message: "Internal server error" });
+    if (req.file?.path) safeUnlink(req.file.path);
+    next(err);
   }
-};
+}
 
-/* =========================
-   DELETE (soft)
-   ========================= */
-export const deleteCamp = async (req, res) => {
+/* -------------------- delete -------------------- */
+export async function deleteCampaign(req, res, next) {
   try {
-    const { id } = req.params;
-    if (!isObjectId(id)) return res.status(400).json({ message: "Invalid id" });
-    const doc = await Camp.findById(id);
-    if (!doc || doc.isDeleted) return res.status(404).json({ message: "Camp not found" });
+    const existing = await Campaign.findById(req.params.id);
+    if (!existing) return res.status(404).json({ message: "Campaign not found" });
 
-    doc.isDeleted = true;
-    await doc.save();
-    return res.json({ message: "Camp deleted" });
+    const posterAbs = existing.posterImg
+      ? path.resolve(process.cwd(), existing.posterImg)
+      : null;
+
+    await existing.deleteOne();
+
+    safeUnlink(posterAbs);
+
+    res.json({ message: "Campaign deleted" });
   } catch (err) {
-    console.error("deleteCamp error:", err);
-    return res.status(500).json({ message: "Internal server error" });
+    next(err);
   }
-};
-
-/* =========================
-   QUICK METRICS PATCHES (optional helpers)
-   ========================= */
-export const incrementMetrics = async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { donorsRegistered = 0, donorsArrived = 0, donorsDeferred = 0, unitsCollected = 0 } =
-      req.body || {};
-    if (!isObjectId(id)) return res.status(400).json({ message: "Invalid id" });
-
-    const doc = await Camp.findById(id);
-    if (!doc || doc.isDeleted) return res.status(404).json({ message: "Camp not found" });
-
-    doc.metrics.donorsRegistered = (doc.metrics.donorsRegistered || 0) + Number(donorsRegistered);
-    doc.metrics.donorsArrived = (doc.metrics.donorsArrived || 0) + Number(donorsArrived);
-    doc.metrics.donorsDeferred = (doc.metrics.donorsDeferred || 0) + Number(donorsDeferred);
-    doc.metrics.unitsCollected = (doc.metrics.unitsCollected || 0) + Number(unitsCollected);
-
-    await doc.save();
-    return res.json({ message: "Metrics updated", camp: campDTO(doc) });
-  } catch (err) {
-    console.error("incrementMetrics error:", err);
-    return res.status(500).json({ message: "Internal server error" });
-  }
-};
+}

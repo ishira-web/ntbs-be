@@ -80,14 +80,6 @@ export const approveAppointment = async (req, res) => {
     if (!appt) return res.status(404).json({ message: "Appointment not found" });
 
     // role checks (expects req.user from your protect middleware)
-    const role = req.user?.role;
-    if (!["admin", "hospital"].includes(role)) {
-      return res.status(403).json({ message: "Forbidden" });
-    }
-    if (role === "hospital" && String(req.user.hospitalId) !== String(appt.hospitalId)) {
-      return res.status(403).json({ message: "Hospital can only approve its own appointments" });
-    }
-
     if (appt.status === "Approved") {
       return res.json({ message: "Already approved", appointment: appt });
     }
