@@ -2,7 +2,7 @@ import mongoose from "mongoose";
 
 const campaignSchema = new mongoose.Schema(
   {
-    hospitalName: { type: mongoose.Schema.Types.ObjectId, ref: "Hospital", required: true},
+    hospitalName: { type: String, required: true},
     title: { type: String, required: true, trim: true },
     organization: { type: String, trim: true },
     status: { type: String, enum: ["planned", "ongoing", "completed", "cancelled"], default: "planned", index: true },

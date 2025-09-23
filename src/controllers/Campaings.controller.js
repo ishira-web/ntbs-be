@@ -1,45 +1,49 @@
-// controllers/campaignController.js
-import fs from "fs";
 import path from "path";
-import multer from "multer";
+import fs from "fs";
 import Campaign from "../models/Campaing.js";
-import { fileURLToPath } from "url";
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
-// Ensure /poster dir exists at project root
-const posterDir = path.resolve(__dirname, "..", "..", "poster");
-if (!fs.existsSync(posterDir)) {
-  fs.mkdirSync(posterDir, { recursive: true });
+// helper: delete file safely
+function safeUnlink(filePath) {
+  try {
+    if (filePath && fs.existsSync(filePath)) {
+      fs.unlinkSync(filePath);
+    }
+  } catch (_) {
+    // ignore
+  }
 }
 
-// ---- Multer disk storage (save a real file into /poster) ----
-const storage = multer.diskStorage({
-  destination: (_req, _file, cb) => cb(null, posterDir),
-  filename: (_req, file, cb) => {
-    // keep a readable but unique-ish filename
-    const safe = file.originalname.replace(/\s+/g, "_").replace(/[^\w.\-]/g, "");
-    cb(null, `${Date.now()}_${safe}`);
-  },
-});
-export const uploadPoster = multer({ storage }).single("poster"); // form field name: poster
-
-// ---- Helpers ----
-function toBase64DataUri(absFilePath, mimetype) {
-  const b64 = fs.readFileSync(absFilePath, { encoding: "base64" });
-  // Data URI allows you to render directly in <img src="...">
-  return `data:${mimetype};base64,${b64}`;
+// helper: get relative path from multer absolute
+function toRelativePath(absPath) {
+  if (!absPath) return null;
+  const idx = absPath.lastIndexOf("uploads");
+  return idx >= 0 ? absPath.substring(idx).replaceAll("\\", "/") : absPath;
 }
 
-// ---- Controllers ----
-export async function createCampaign(req, res) {
+// helper: validate dates
+function assertDates(startAt, endAt) {
+  const start = new Date(startAt);
+  const end = new Date(endAt);
+  if (isNaN(start) || isNaN(end)) {
+    const err = new Error("Invalid dates supplied");
+    err.status = 400;
+    throw err;
+  }
+  if (start > end) {
+    const err = new Error("startAt cannot be after endAt");
+    err.status = 400;
+    throw err;
+  }
+}
+
+/* -------------------- create -------------------- */
+export async function createCampaign(req, res, next) {
   try {
     const {
-      hospitalName, // ObjectId
+      hospitalName,
       title,
       organization,
-      status,       // planned | ongoing | completed | cancelled
+      status,
       startAt,
       endAt,
       venue,
@@ -47,71 +51,107 @@ export async function createCampaign(req, res) {
     } = req.body;
 
     if (!hospitalName || !title || !startAt || !endAt) {
-      return res.status(400).json({ message: "hospitalName, title, startAt, endAt are required." });
+      return res
+        .status(400)
+        .json({ message: "hospitalName, title, startAt, endAt are required." });
     }
 
-    // Basic date sanity
-    const start = new Date(startAt);
-    const end = new Date(endAt);
-    if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) {
-      return res.status(400).json({ message: "startAt/endAt must be valid dates." });
-    }
-    if (end < start) {
-      return res.status(400).json({ message: "endAt must be after startAt." });
-    }
+    assertDates(startAt, endAt);
 
-    // Poster handling:
-    // - If a file was uploaded, save file (multer already did), then also store Base64 in DB.
-    let posterImg = undefined;
-    if (req.file) {
-      posterImg = toBase64DataUri(req.file.path, req.file.mimetype);
-    }
+    const posterImg = toRelativePath(req.file?.path);
 
     const doc = await Campaign.create({
       hospitalName,
-      title,
-      organization,
+      title: title?.trim(),
+      organization: organization?.trim(),
       status,
-      startAt: start,
-      endAt: end,
-      venue,
-      locationUrl,
-      posterImg, // Base64 data URI or undefined
+      startAt,
+      endAt,
+      venue: venue?.trim(),
+      posterImg,
+      locationUrl: locationUrl?.trim(),
     });
 
-    return res.status(201).json(doc);
+    res.status(201).json(doc);
   } catch (err) {
-    console.error("createCampaign error:", err);
-    return res.status(500).json({ message: "Failed to create campaign.", error: err.message });
+    if (req.file?.path) safeUnlink(req.file.path);
+    next(err);
   }
 }
 
-export async function listCampaigns(_req, res) {
+/* -------------------- list -------------------- */
+export async function listCampaigns(req, res, next) {
   try {
-    // You can project out posterImg if responses get too heavy
-    const items = await Campaign.find().sort({ startAt: -1 }).lean();
-    return res.json(items);
+    const {
+      page = 1,
+      limit = 10,
+      q,
+      status,
+      from,
+      to,
+      sort = "-createdAt",
+    } = req.query;
+
+    const filter = {};
+    if (status) filter.status = status;
+
+    if (from || to) {
+      filter.$and = [];
+      if (from) filter.$and.push({ startAt: { $gte: new Date(from) } });
+      if (to) filter.$and.push({ endAt: { $lte: new Date(to) } });
+      if (!filter.$and.length) delete filter.$and;
+    }
+
+    if (q) {
+      filter.$or = [
+        { title: { $regex: q, $options: "i" } },
+        { organization: { $regex: q, $options: "i" } },
+        { venue: { $regex: q, $options: "i" } },
+        { hospitalName: { $regex: q, $options: "i" } },
+      ];
+    }
+
+    const pageNum = Math.max(parseInt(page, 10), 1);
+    const limitNum = Math.min(Math.max(parseInt(limit, 10), 1), 100);
+
+    const [items, total] = await Promise.all([
+      Campaign.find(filter)
+        .sort(sort)
+        .skip((pageNum - 1) * limitNum)
+        .limit(limitNum),
+      Campaign.countDocuments(filter),
+    ]);
+
+    res.json({
+      data: items,
+      page: pageNum,
+      limit: limitNum,
+      total,
+      pages: Math.ceil(total / limitNum),
+    });
   } catch (err) {
-    console.error("listCampaigns error:", err);
-    return res.status(500).json({ message: "Failed to fetch campaigns.", error: err.message });
+    next(err);
   }
 }
 
-export async function getCampaign(req, res) {
+/* -------------------- get one -------------------- */
+export async function getCampaign(req, res, next) {
+  try {
+    const doc = await Campaign.findById(req.params.id);
+    if (!doc) return res.status(404).json({ message: "Campaign not found" });
+    res.json(doc);
+  } catch (err) {
+    next(err);
+  }
+}
+
+/* -------------------- update -------------------- */
+export async function updateCampaign(req, res, next) {
   try {
     const { id } = req.params;
-    const item = await Campaign.findById(id);
-    if (!item) return res.status(404).json({ message: "Campaign not found." });
-    return res.json(item);
-  } catch (err) {
-    console.error("getCampaign error:", err);
-    return res.status(500).json({ message: "Failed to fetch campaign.", error: err.message });
-  }
-}
+    const existing = await Campaign.findById(id);
+    if (!existing) return res.status(404).json({ message: "Campaign not found" });
 
-export async function updateCampaign(req, res) {
-  try {
-    const { id } = req.params;
     const {
       hospitalName,
       title,
@@ -123,56 +163,57 @@ export async function updateCampaign(req, res) {
       locationUrl,
     } = req.body;
 
-    const patch = {
-      ...(hospitalName && { hospitalName }),
-      ...(title && { title }),
-      ...(organization && { organization }),
-      ...(status && { status }),
-      ...(venue && { venue }),
-      ...(locationUrl && { locationUrl }),
-    };
-
-    if (startAt) {
-      const s = new Date(startAt);
-      if (Number.isNaN(s.getTime())) return res.status(400).json({ message: "startAt invalid." });
-      patch.startAt = s;
-    }
-    if (endAt) {
-      const e = new Date(endAt);
-      if (Number.isNaN(e.getTime())) return res.status(400).json({ message: "endAt invalid." });
-      patch.endAt = e;
-    }
-    if (patch.startAt && patch.endAt && patch.endAt < patch.startAt) {
-      return res.status(400).json({ message: "endAt must be after startAt." });
+    if (startAt || endAt) {
+      assertDates(startAt ?? existing.startAt, endAt ?? existing.endAt);
     }
 
-    // If a new poster file is uploaded, replace posterImg with new Base64
-    if (req.file) {
-      patch.posterImg = toBase64DataUri(req.file.path, req.file.mimetype);
+    let newPosterRel = existing.posterImg;
+    let oldPosterAbs;
+
+    if (req.file?.path) {
+      newPosterRel = toRelativePath(req.file.path);
+      if (existing.posterImg) {
+        oldPosterAbs = path.resolve(process.cwd(), existing.posterImg);
+      }
     }
 
-    const updated = await Campaign.findByIdAndUpdate(id, patch, { new: true });
-    if (!updated) return res.status(404).json({ message: "Campaign not found." });
-    return res.json(updated);
+    existing.hospitalName = hospitalName ?? existing.hospitalName;
+    existing.title = title?.trim() ?? existing.title;
+    existing.organization = organization?.trim() ?? existing.organization;
+    if (status) existing.status = status;
+    existing.startAt = startAt ?? existing.startAt;
+    existing.endAt = endAt ?? existing.endAt;
+    existing.venue = venue?.trim() ?? existing.venue;
+    existing.locationUrl = locationUrl?.trim() ?? existing.locationUrl;
+    existing.posterImg = newPosterRel;
+
+    const saved = await existing.save();
+
+    if (oldPosterAbs) safeUnlink(oldPosterAbs);
+
+    res.json(saved);
   } catch (err) {
-    console.error("updateCampaign error:", err);
-    return res.status(500).json({ message: "Failed to update campaign.", error: err.message });
+    if (req.file?.path) safeUnlink(req.file.path);
+    next(err);
   }
 }
 
-export async function deleteCampaign(req, res) {
+/* -------------------- delete -------------------- */
+export async function deleteCampaign(req, res, next) {
   try {
-    const { id } = req.params;
-    const deleted = await Campaign.findByIdAndDelete(id);
-    if (!deleted) return res.status(404).json({ message: "Campaign not found." });
+    const existing = await Campaign.findById(req.params.id);
+    if (!existing) return res.status(404).json({ message: "Campaign not found" });
 
-    // NOTE: We saved the physical file in /poster but only kept Base64 in DB.
-    // Without storing the saved filename/path in DB, we cannot reliably delete the disk file here.
-    // If you want auto-cleanup, add a `posterFileName` field in your schema and save it during upload.
+    const posterAbs = existing.posterImg
+      ? path.resolve(process.cwd(), existing.posterImg)
+      : null;
 
-    return res.json({ message: "Campaign deleted." });
+    await existing.deleteOne();
+
+    safeUnlink(posterAbs);
+
+    res.json({ message: "Campaign deleted" });
   } catch (err) {
-    console.error("deleteCampaign error:", err);
-    return res.status(500).json({ message: "Failed to delete campaign.", error: err.message });
+    next(err);
   }
 }
