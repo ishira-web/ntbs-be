@@ -1,249 +1,178 @@
-import mongoose from "mongoose";
-import Camp, { CAMP_STATUSES } from "../models/Campaing.js";
+// controllers/campaignController.js
+import fs from "fs";
+import path from "path";
+import multer from "multer";
+import Campaign from "../models/Campaing.js";
+import { fileURLToPath } from "url";
 
-const isObjectId = (v) => mongoose.Types.ObjectId.isValid(v);
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
-const pick = (obj, keys) =>
-  keys.reduce((acc, k) => (obj[k] !== undefined ? ((acc[k] = obj[k]), acc) : acc), {});
+// Ensure /poster dir exists at project root
+const posterDir = path.resolve(__dirname, "..", "..", "poster");
+if (!fs.existsSync(posterDir)) {
+  fs.mkdirSync(posterDir, { recursive: true });
+}
 
-const campDTO = (doc) => {
-  if (!doc) return null;
-  const o = doc.toObject ? doc.toObject({ virtuals: true }) : { ...doc };
-  return {
-    _id: o._id,
-    hospitalId: o.hospitalId,
-    name: o.name,
-    organizer: o.organizer,
-    contact: o.contact,
-    status: o.status,
-    startAt: o.startAt,
-    endAt: o.endAt,
-    location: o.location,
-    expectedDonors: o.expectedDonors,
-    capacity: o.capacity,
-    metrics: o.metrics,
-    notes: o.notes,
-    createdAt: o.createdAt,
-    updatedAt: o.updatedAt,
-    isDeleted: o.isDeleted,
-  };
-};
+// ---- Multer disk storage (save a real file into /poster) ----
+const storage = multer.diskStorage({
+  destination: (_req, _file, cb) => cb(null, posterDir),
+  filename: (_req, file, cb) => {
+    // keep a readable but unique-ish filename
+    const safe = file.originalname.replace(/\s+/g, "_").replace(/[^\w.\-]/g, "");
+    cb(null, `${Date.now()}_${safe}`);
+  },
+});
+export const uploadPoster = multer({ storage }).single("poster"); // form field name: poster
 
-/* =========================
-   CREATE
-   ========================= */
-export const createCamp = async (req, res) => {
-  try {
-    const body = req.body || {};
-    const required = ["hospitalId", "name", "startAt", "endAt"];
-    for (const k of required) {
-      if (!body[k]) return res.status(400).json({ message: `${k} is required` });
-    }
-    if (!isObjectId(body.hospitalId)) {
-      return res.status(400).json({ message: "Invalid hospitalId" });
-    }
-    if (body.status && !CAMP_STATUSES.includes(body.status)) {
-      return res.status(400).json({ message: "Invalid status" });
-    }
+// ---- Helpers ----
+function toBase64DataUri(absFilePath, mimetype) {
+  const b64 = fs.readFileSync(absFilePath, { encoding: "base64" });
+  // Data URI allows you to render directly in <img src="...">
+  return `data:${mimetype};base64,${b64}`;
+}
 
-    const camp = new Camp({
-      hospitalId: body.hospitalId,
-      name: body.name,
-      organizer: body.organizer,
-      contact: body.contact,
-      status: body.status || "planned",
-      startAt: body.startAt,
-      endAt: body.endAt,
-      location: body.location,
-      expectedDonors: body.expectedDonors,
-      capacity: body.capacity,
-      metrics: body.metrics,
-      notes: body.notes,
-      createdBy: req.user?._id, // optional if you attach auth
-    });
-
-    await camp.save();
-    return res.status(201).json({ message: "Camp created", camp: campDTO(camp) });
-  } catch (err) {
-    console.error("createCamp error:", err);
-    return res.status(500).json({ message: "Internal server error" });
-  }
-};
-
-/* =========================
-   LIST / SEARCH
-   ========================= */
-/**
- * Query params:
- *  - hospitalId? (ObjectId)
- *  - status? (planned|scheduled|ongoing|completed|cancelled)
- *  - q? (search in name/organizer/city/district)
- *  - from?, to? (ISO date strings for startAt range)
- *  - page=1, limit=10
- *  - sort="-startAt"
- *  - includeDeleted=false
- */
-export const listCamps = async (req, res) => {
+// ---- Controllers ----
+export async function createCampaign(req, res) {
   try {
     const {
-      hospitalId,
+      hospitalName, // ObjectId
+      title,
+      organization,
+      status,       // planned | ongoing | completed | cancelled
+      startAt,
+      endAt,
+      venue,
+      locationUrl,
+    } = req.body;
+
+    if (!hospitalName || !title || !startAt || !endAt) {
+      return res.status(400).json({ message: "hospitalName, title, startAt, endAt are required." });
+    }
+
+    // Basic date sanity
+    const start = new Date(startAt);
+    const end = new Date(endAt);
+    if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) {
+      return res.status(400).json({ message: "startAt/endAt must be valid dates." });
+    }
+    if (end < start) {
+      return res.status(400).json({ message: "endAt must be after startAt." });
+    }
+
+    // Poster handling:
+    // - If a file was uploaded, save file (multer already did), then also store Base64 in DB.
+    let posterImg = undefined;
+    if (req.file) {
+      posterImg = toBase64DataUri(req.file.path, req.file.mimetype);
+    }
+
+    const doc = await Campaign.create({
+      hospitalName,
+      title,
+      organization,
       status,
-      q,
-      from,
-      to,
-      page = 1,
-      limit = 10,
-      sort = "-startAt",
-      includeDeleted = "false",
-    } = req.query;
-
-    const filter = {};
-    if (hospitalId) {
-      if (!isObjectId(hospitalId)) return res.status(400).json({ message: "Invalid hospitalId" });
-      filter.hospitalId = hospitalId;
-    }
-    if (status) {
-      if (!CAMP_STATUSES.includes(status)) {
-        return res.status(400).json({ message: "Invalid status" });
-      }
-      filter.status = status;
-    }
-    if (includeDeleted !== "true") filter.isDeleted = { $ne: true };
-
-    // date window on startAt
-    if (from || to) {
-      filter.startAt = {};
-      if (from) filter.startAt.$gte = new Date(from);
-      if (to) filter.startAt.$lte = new Date(to);
-    }
-
-    // free-text search
-    if (q) {
-      const regex = new RegExp(q.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
-      filter.$or = [
-        { name: regex },
-        { organizer: regex },
-        { "location.city": regex },
-        { "location.district": regex },
-      ];
-    }
-
-    const cursor = Camp.find(filter);
-    const total = await Camp.countDocuments(cursor.getFilter());
-    const docs = await cursor
-      .sort(sort)
-      .skip((Number(page) - 1) * Number(limit))
-      .limit(Number(limit));
-
-    return res.json({
-      total,
-      page: Number(page),
-      limit: Number(limit),
-      camps: docs.map(campDTO),
+      startAt: start,
+      endAt: end,
+      venue,
+      locationUrl,
+      posterImg, // Base64 data URI or undefined
     });
-  } catch (err) {
-    console.error("listCamps error:", err);
-    return res.status(500).json({ message: "Internal server error" });
-  }
-};
 
-/* =========================
-   READ ONE
-   ========================= */
-export const getCampById = async (req, res) => {
+    return res.status(201).json(doc);
+  } catch (err) {
+    console.error("createCampaign error:", err);
+    return res.status(500).json({ message: "Failed to create campaign.", error: err.message });
+  }
+}
+
+export async function listCampaigns(_req, res) {
+  try {
+    // You can project out posterImg if responses get too heavy
+    const items = await Campaign.find().sort({ startAt: -1 }).lean();
+    return res.json(items);
+  } catch (err) {
+    console.error("listCampaigns error:", err);
+    return res.status(500).json({ message: "Failed to fetch campaigns.", error: err.message });
+  }
+}
+
+export async function getCampaign(req, res) {
   try {
     const { id } = req.params;
-    if (!isObjectId(id)) return res.status(400).json({ message: "Invalid id" });
-    const doc = await Camp.findById(id);
-    if (!doc || doc.isDeleted) return res.status(404).json({ message: "Camp not found" });
-    return res.json({ camp: campDTO(doc) });
+    const item = await Campaign.findById(id);
+    if (!item) return res.status(404).json({ message: "Campaign not found." });
+    return res.json(item);
   } catch (err) {
-    console.error("getCampById error:", err);
-    return res.status(500).json({ message: "Internal server error" });
+    console.error("getCampaign error:", err);
+    return res.status(500).json({ message: "Failed to fetch campaign.", error: err.message });
   }
-};
+}
 
-/* =========================
-   UPDATE
-   ========================= */
-export const updateCamp = async (req, res) => {
+export async function updateCampaign(req, res) {
   try {
     const { id } = req.params;
-    if (!isObjectId(id)) return res.status(400).json({ message: "Invalid id" });
+    const {
+      hospitalName,
+      title,
+      organization,
+      status,
+      startAt,
+      endAt,
+      venue,
+      locationUrl,
+    } = req.body;
 
-    const allowed = [
-      "name",
-      "organizer",
-      "contact",
-      "status",
-      "startAt",
-      "endAt",
-      "location",
-      "expectedDonors",
-      "capacity",
-      "metrics",
-      "notes",
-    ];
-    const patch = pick(req.body || {}, allowed);
+    const patch = {
+      ...(hospitalName && { hospitalName }),
+      ...(title && { title }),
+      ...(organization && { organization }),
+      ...(status && { status }),
+      ...(venue && { venue }),
+      ...(locationUrl && { locationUrl }),
+    };
 
-    if (patch.status && !CAMP_STATUSES.includes(patch.status)) {
-      return res.status(400).json({ message: "Invalid status" });
+    if (startAt) {
+      const s = new Date(startAt);
+      if (Number.isNaN(s.getTime())) return res.status(400).json({ message: "startAt invalid." });
+      patch.startAt = s;
+    }
+    if (endAt) {
+      const e = new Date(endAt);
+      if (Number.isNaN(e.getTime())) return res.status(400).json({ message: "endAt invalid." });
+      patch.endAt = e;
+    }
+    if (patch.startAt && patch.endAt && patch.endAt < patch.startAt) {
+      return res.status(400).json({ message: "endAt must be after startAt." });
     }
 
-    const doc = await Camp.findById(id);
-    if (!doc || doc.isDeleted) return res.status(404).json({ message: "Camp not found" });
+    // If a new poster file is uploaded, replace posterImg with new Base64
+    if (req.file) {
+      patch.posterImg = toBase64DataUri(req.file.path, req.file.mimetype);
+    }
 
-    Object.assign(doc, patch, { updatedBy: req.user?._id });
-    await doc.save();
-
-    return res.json({ message: "Camp updated", camp: campDTO(doc) });
+    const updated = await Campaign.findByIdAndUpdate(id, patch, { new: true });
+    if (!updated) return res.status(404).json({ message: "Campaign not found." });
+    return res.json(updated);
   } catch (err) {
-    console.error("updateCamp error:", err);
-    return res.status(500).json({ message: "Internal server error" });
+    console.error("updateCampaign error:", err);
+    return res.status(500).json({ message: "Failed to update campaign.", error: err.message });
   }
-};
+}
 
-/* =========================
-   DELETE (soft)
-   ========================= */
-export const deleteCamp = async (req, res) => {
+export async function deleteCampaign(req, res) {
   try {
     const { id } = req.params;
-    if (!isObjectId(id)) return res.status(400).json({ message: "Invalid id" });
-    const doc = await Camp.findById(id);
-    if (!doc || doc.isDeleted) return res.status(404).json({ message: "Camp not found" });
+    const deleted = await Campaign.findByIdAndDelete(id);
+    if (!deleted) return res.status(404).json({ message: "Campaign not found." });
 
-    doc.isDeleted = true;
-    await doc.save();
-    return res.json({ message: "Camp deleted" });
+    // NOTE: We saved the physical file in /poster but only kept Base64 in DB.
+    // Without storing the saved filename/path in DB, we cannot reliably delete the disk file here.
+    // If you want auto-cleanup, add a `posterFileName` field in your schema and save it during upload.
+
+    return res.json({ message: "Campaign deleted." });
   } catch (err) {
-    console.error("deleteCamp error:", err);
-    return res.status(500).json({ message: "Internal server error" });
+    console.error("deleteCampaign error:", err);
+    return res.status(500).json({ message: "Failed to delete campaign.", error: err.message });
   }
-};
-
-/* =========================
-   QUICK METRICS PATCHES (optional helpers)
-   ========================= */
-export const incrementMetrics = async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { donorsRegistered = 0, donorsArrived = 0, donorsDeferred = 0, unitsCollected = 0 } =
-      req.body || {};
-    if (!isObjectId(id)) return res.status(400).json({ message: "Invalid id" });
-
-    const doc = await Camp.findById(id);
-    if (!doc || doc.isDeleted) return res.status(404).json({ message: "Camp not found" });
-
-    doc.metrics.donorsRegistered = (doc.metrics.donorsRegistered || 0) + Number(donorsRegistered);
-    doc.metrics.donorsArrived = (doc.metrics.donorsArrived || 0) + Number(donorsArrived);
-    doc.metrics.donorsDeferred = (doc.metrics.donorsDeferred || 0) + Number(donorsDeferred);
-    doc.metrics.unitsCollected = (doc.metrics.unitsCollected || 0) + Number(unitsCollected);
-
-    await doc.save();
-    return res.json({ message: "Metrics updated", camp: campDTO(doc) });
-  } catch (err) {
-    console.error("incrementMetrics error:", err);
-    return res.status(500).json({ message: "Internal server error" });
-  }
-};
+}

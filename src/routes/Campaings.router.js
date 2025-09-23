@@ -1,28 +1,27 @@
-// server/routes/Camp.router.js
+// routes/campaignRoutes.js
 import { Router } from "express";
 import {
-  createCamp,
-  listCamps,
-  getCampById,
-  updateCamp,
-  deleteCamp,
-  incrementMetrics,
+  uploadPoster,
+  createCampaign,
+  listCampaigns,
+  getCampaign,
+  updateCampaign,
+  deleteCampaign,
 } from "../controllers/Campaings.controller.js";
 
-const crouter = Router();
+const router = Router();
 
-// Create
-crouter.post("/", createCamp);
+// Create with optional poster file (form field name: "poster")
+router.post("/", uploadPoster, createCampaign);
 
-// List / search should come before param routes
-crouter.get("/", listCamps);
+// List / Get
+router.get("/", listCampaigns);
+router.get("/:id", getCampaign);
 
-// Metrics helper (optional)
-crouter.patch("/:id/metrics", incrementMetrics);
+// Update (can also replace poster)
+router.put("/:id", uploadPoster, updateCampaign);
 
-// Read / Update / Delete
-crouter.get("/:id", getCampById);
-crouter.patch("/:id", updateCamp);
-crouter.delete("/:id", deleteCamp);
+// Delete
+router.delete("/:id", deleteCampaign);
 
-export default crouter;
+export default router;
