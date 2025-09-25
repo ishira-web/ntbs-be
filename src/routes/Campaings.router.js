@@ -1,24 +1,29 @@
+// server/routes/campaign.routes.js
 import { Router } from "express";
 import {
   createCampaign,
-  listCampaigns,
-  getCampaign,
+  getCampaigns,
+  getCampaignById,
   updateCampaign,
-  deleteCampaign
+  deleteCampaign,
 } from "../controllers/Campaings.controller.js";
-import { uploadCampaignPoster } from "../configs/multer-campaign.js";
+import { uploadPoster } from "../configs/upload.js";
 
 const router = Router();
 
-// Serve uploaded files (once, at app-level) – see app.js section below
-// app.use("/uploads", express.static(path.join(__dirname, "uploads")));
+// Create (multipart/form-data with field: poster)
+router.post("/", uploadPoster, createCampaign);
 
-router.get("/", listCampaigns);
-router.get("/:id", getCampaign);
+// List + filters
+router.get("/", getCampaigns);
 
-// Expect multipart/form-data with field `poster` for the image
-router.post("/", uploadCampaignPoster, createCampaign);
-router.put("/:id", uploadCampaignPoster, updateCampaign);
+// Get one
+router.get("/:id", getCampaignById);
+
+// Update (multipart optional: poster)
+router.patch("/:id", uploadPoster, updateCampaign);
+
+// Delete
 router.delete("/:id", deleteCampaign);
 
 export default router;

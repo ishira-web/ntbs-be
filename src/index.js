@@ -36,26 +36,24 @@ app.use(
   })
 );
 
-/* ---------- Parsers ---------- */
-app.use(express.json({ limit: "10mb" })); // large enough for base64 bodies if you use them
-app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
 
+/* ---------- Parsers (JSON guarded to skip multipart) ---------- */
+const jsonOnly = express.json({ limit: "10mb" });
+app.use((req, res, next) => {
+  const ct = (req.headers["content-type"] || "").toLowerCase();
+  if (ct.startsWith("multipart/form-data")) return next(); // skip JSON parser
+  return jsonOnly(req, res, next);
+});
+
+// urlencoded is safe (doesn't parse multipart)
+app.use(express.urlencoded({ extended: true }));
+
 /* ---------- Static file serving ---------- */
-/**
- * Your project currently saves/serves posters from a "poster" directory.
- * Keep that as-is:
- *   <img src="/poster/<filename>" />
- */
 const POSTER_DIR = path.join(__dirname, "poster");
 if (!fs.existsSync(POSTER_DIR)) fs.mkdirSync(POSTER_DIR, { recursive: true });
 app.use("/poster", express.static(POSTER_DIR));
 
-/**
- * If you switch to the suggested multer config that saves into "uploads/campaigns",
- * this static mount will serve them too:
- *   <img src="/uploads/campaigns/<filename>" />
- */
 const UPLOADS_DIR = path.join(__dirname, "uploads");
 if (!fs.existsSync(UPLOADS_DIR)) fs.mkdirSync(UPLOADS_DIR, { recursive: true });
 app.use("/uploads", express.static(UPLOADS_DIR));
@@ -71,7 +69,7 @@ app.use("/api/hospital", HospitalRouter);
 app.use("/api/admin", adminRouter);
 app.use("/api/bloodstock", bloodstockRouter);
 app.use("/api", authRouter);
-app.use("/api/camps", campRouter);
+app.use("/api/camps", campRouter); // POST/PUT in this router must use multer.single('poster')
 app.use("/api/requests", requestRouter);
 app.use("/api/appointments", appointmentRouter);
 
@@ -85,12 +83,9 @@ app.use((req, res, next) => {
 app.use((err, req, res, _next) => {
   console.error(err);
 
-  // Multer errors (bad file type, too large, etc.)
   if (err?.name === "MulterError") {
     return res.status(400).json({ message: err.message });
   }
-
-  // Mongoose validation errors
   if (err?.name === "ValidationError") {
     return res.status(422).json({
       message: "Validation failed",
@@ -100,7 +95,6 @@ app.use((err, req, res, _next) => {
     });
   }
 
-  // Custom errors with status
   const status = err.status || 500;
   res.status(status).json({ message: err.message || "Internal Server Error" });
 });
@@ -110,9 +104,10 @@ app.use((err, req, res, _next) => {
   try {
     await connectDB();
     app.listen(PORT, () => {
+      console.log(`Database connected successfully`);
       console.log(`Server running on http://localhost:${PORT}`);
-    //   console.log(`Static posters at /poster  (dir: ${POSTER_DIR})`);
-    //   console.log(`Static uploads at /uploads (dir: ${UPLOADS_DIR})`);
+      console.log(`Static posters at /poster  (dir: ${POSTER_DIR})`);
+      console.log(`Static uploads at /uploads (dir: ${UPLOADS_DIR})`);
     });
   } catch (e) {
     console.error("Failed to connect DB:", e);
