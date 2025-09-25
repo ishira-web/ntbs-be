@@ -217,3 +217,37 @@ export async function deleteCampaign(req, res, next) {
     next(err);
   }
 }
+
+export async function patchCampaign(req, res, next) {
+  try {
+    const { id } = req.params;
+
+    // Only pick safe fields you want to allow via patch:
+    const allowed = ["hospitalName", "title", "organization", "status", "startAt", "endAt", "venue", "locationUrl"];
+    const update = {};
+    for (const k of allowed) {
+      if (req.body[k] !== undefined && req.body[k] !== null && req.body[k] !== "") {
+        update[k] = req.body[k];
+      }
+    }
+
+    // If only updating status, no need to validate dates. If start/end provided, validate.
+    if (update.startAt || update.endAt) {
+      const existing = await Campaign.findById(id);
+      if (!existing) return res.status(404).json({ message: "Campaign not found" });
+      const start = update.startAt ?? existing.startAt;
+      const end = update.endAt ?? existing.endAt;
+      assertDates(start, end);
+    }
+
+    const saved = await Campaign.findByIdAndUpdate(id, update, {
+      new: true,
+      runValidators: true,
+    });
+    if (!saved) return res.status(404).json({ message: "Campaign not found" });
+
+    res.json(saved);
+  } catch (err) {
+    next(err);
+  }
+}
