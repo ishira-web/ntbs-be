@@ -1,49 +1,27 @@
-import path from "path";
-import fs from "fs";
-import Campaign from "../models/Campaing.js";
+// server/controllers/campaign.controller.js
+import mongoose from "mongoose";
+import Campaign from "../models/Campaing.js"; // your model path
+import cloudinary from "../middleware/cloudinary.js";
 
-// helper: delete file safely
-function safeUnlink(filePath) {
-  try {
-    if (filePath && fs.existsSync(filePath)) {
-      fs.unlinkSync(filePath);
-    }
-  } catch (_) {
-    // ignore
-  }
-}
+const FOLDER = process.env.CLOUDINARY_CAMPAIGN_FOLDER || "campaign_posters";
 
-// helper: get relative path from multer absolute
-function toRelativePath(absPath) {
-  if (!absPath) return null;
-  const idx = absPath.lastIndexOf("uploads");
-  return idx >= 0 ? absPath.substring(idx).replaceAll("\\", "/") : absPath;
-}
+// helper: upload buffer to cloudinary (stream)
+const uploadBufferToCloudinary = (buffer, filename) =>
+  new Promise((resolve, reject) => {
+    const stream = cloudinary.uploader.upload_stream(
+      { folder: FOLDER, resource_type: "image", public_id: filename || undefined, overwrite: true },
+      (err, result) => (err ? reject(err) : resolve(result))
+    );
+    stream.end(buffer);
+  });
 
-// helper: validate dates
-function assertDates(startAt, endAt) {
-  const start = new Date(startAt);
-  const end = new Date(endAt);
-  if (isNaN(start) || isNaN(end)) {
-    const err = new Error("Invalid dates supplied");
-    err.status = 400;
-    throw err;
-  }
-  if (start > end) {
-    const err = new Error("startAt cannot be after endAt");
-    err.status = 400;
-    throw err;
-  }
-}
-
-/* -------------------- create -------------------- */
-export async function createCampaign(req, res, next) {
+export const createCampaign = async (req, res) => {
   try {
     const {
       hospitalName,
       title,
       organization,
-      status,
+      status, // planned | ongoing | completed | cancelled
       startAt,
       endAt,
       venue,
@@ -51,63 +29,66 @@ export async function createCampaign(req, res, next) {
     } = req.body;
 
     if (!hospitalName || !title || !startAt || !endAt) {
-      return res
-        .status(400)
-        .json({ message: "hospitalName, title, startAt, endAt are required." });
+      return res.status(400).json({ message: "hospitalName, title, startAt, endAt are required." });
     }
 
-    assertDates(startAt, endAt);
+    const start = new Date(startAt);
+    const end = new Date(endAt);
+    if (isNaN(start) || isNaN(end)) {
+      return res.status(400).json({ message: "startAt/endAt must be valid dates." });
+    }
+    if (end < start) {
+      return res.status(400).json({ message: "endAt cannot be earlier than startAt." });
+    }
 
-    const posterImg = toRelativePath(req.file?.path);
+    let posterImg, posterPublicId;
 
-    const doc = await Campaign.create({
+    // If a file came through multer, upload to Cloudinary
+    if (req.file) {
+      const upload = await uploadBufferToCloudinary(req.file.buffer, undefined);
+      posterImg = upload.secure_url;
+      posterPublicId = upload.public_id;
+    }
+
+    const campaign = await Campaign.create({
       hospitalName,
-      title: title?.trim(),
-      organization: organization?.trim(),
+      title,
+      organization,
       status,
-      startAt,
-      endAt,
-      venue: venue?.trim(),
+      startAt: start,
+      endAt: end,
+      venue,
       posterImg,
-      locationUrl: locationUrl?.trim(),
+      posterPublicId, // add this field to the model (below) so we can delete later
+      locationUrl,
     });
 
-    res.status(201).json(doc);
+    return res.status(201).json({ message: "Campaign created", data: campaign });
   } catch (err) {
-    if (req.file?.path) safeUnlink(req.file.path);
-    next(err);
+    console.error("createCampaign error:", err);
+    return res.status(500).json({ message: "Internal server error", error: err.message });
   }
-}
+};
 
-/* -------------------- list -------------------- */
-export async function listCampaigns(req, res, next) {
+export const getCampaigns = async (req, res) => {
   try {
     const {
       page = 1,
       limit = 10,
-      q,
+      sort = "-startAt", // default: newest starting first
       status,
-      from,
-      to,
-      sort = "-createdAt",
+      q, // search term in title/organization/hospitalName/venue
     } = req.query;
 
     const filter = {};
     if (status) filter.status = status;
 
-    if (from || to) {
-      filter.$and = [];
-      if (from) filter.$and.push({ startAt: { $gte: new Date(from) } });
-      if (to) filter.$and.push({ endAt: { $lte: new Date(to) } });
-      if (!filter.$and.length) delete filter.$and;
-    }
-
     if (q) {
       filter.$or = [
         { title: { $regex: q, $options: "i" } },
         { organization: { $regex: q, $options: "i" } },
-        { venue: { $regex: q, $options: "i" } },
         { hospitalName: { $regex: q, $options: "i" } },
+        { venue: { $regex: q, $options: "i" } },
       ];
     }
 
@@ -115,139 +96,94 @@ export async function listCampaigns(req, res, next) {
     const limitNum = Math.min(Math.max(parseInt(limit, 10), 1), 100);
 
     const [items, total] = await Promise.all([
-      Campaign.find(filter)
-        .sort(sort)
-        .skip((pageNum - 1) * limitNum)
-        .limit(limitNum),
+      Campaign.find(filter).sort(sort).skip((pageNum - 1) * limitNum).limit(limitNum),
       Campaign.countDocuments(filter),
     ]);
 
-    res.json({
+    return res.json({
       data: items,
-      page: pageNum,
-      limit: limitNum,
-      total,
-      pages: Math.ceil(total / limitNum),
+      pagination: {
+        page: pageNum,
+        limit: limitNum,
+        total,
+        pages: Math.ceil(total / limitNum),
+      },
     });
   } catch (err) {
-    next(err);
+    console.error("getCampaigns error:", err);
+    return res.status(500).json({ message: "Internal server error", error: err.message });
   }
-}
+};
 
-/* -------------------- get one -------------------- */
-export async function getCampaign(req, res, next) {
-  try {
-    const doc = await Campaign.findById(req.params.id);
-    if (!doc) return res.status(404).json({ message: "Campaign not found" });
-    res.json(doc);
-  } catch (err) {
-    next(err);
-  }
-}
-
-/* -------------------- update -------------------- */
-export async function updateCampaign(req, res, next) {
+export const getCampaignById = async (req, res) => {
   try {
     const { id } = req.params;
+    if (!mongoose.isValidObjectId(id)) return res.status(400).json({ message: "Invalid id" });
+
+    const campaign = await Campaign.findById(id);
+    if (!campaign) return res.status(404).json({ message: "Not found" });
+
+    return res.json({ data: campaign });
+  } catch (err) {
+    console.error("getCampaignById error:", err);
+    return res.status(500).json({ message: "Internal server error", error: err.message });
+  }
+};
+
+export const updateCampaign = async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!mongoose.isValidObjectId(id)) return res.status(400).json({ message: "Invalid id" });
+
     const existing = await Campaign.findById(id);
-    if (!existing) return res.status(404).json({ message: "Campaign not found" });
+    if (!existing) return res.status(404).json({ message: "Not found" });
 
-    const {
-      hospitalName,
-      title,
-      organization,
-      status,
-      startAt,
-      endAt,
-      venue,
-      locationUrl,
-    } = req.body;
+    const updates = { ...req.body };
 
-    if (startAt || endAt) {
-      assertDates(startAt ?? existing.startAt, endAt ?? existing.endAt);
+    // Validate dates if provided
+    if (updates.startAt) updates.startAt = new Date(updates.startAt);
+    if (updates.endAt) updates.endAt = new Date(updates.endAt);
+    if (updates.startAt && isNaN(updates.startAt)) return res.status(400).json({ message: "Invalid startAt" });
+    if (updates.endAt && isNaN(updates.endAt)) return res.status(400).json({ message: "Invalid endAt" });
+    if (updates.startAt && updates.endAt && updates.endAt < updates.startAt) {
+      return res.status(400).json({ message: "endAt cannot be earlier than startAt" });
     }
 
-    let newPosterRel = existing.posterImg;
-    let oldPosterAbs;
-
-    if (req.file?.path) {
-      newPosterRel = toRelativePath(req.file.path);
-      if (existing.posterImg) {
-        oldPosterAbs = path.resolve(process.cwd(), existing.posterImg);
+    // If replacing poster
+    if (req.file) {
+      // delete old if exists
+      if (existing.posterPublicId) {
+        try { await cloudinary.uploader.destroy(existing.posterPublicId); } catch (_) {}
       }
+      const upload = await uploadBufferToCloudinary(req.file.buffer, undefined);
+      updates.posterImg = upload.secure_url;
+      updates.posterPublicId = upload.public_id;
     }
 
-    existing.hospitalName = hospitalName ?? existing.hospitalName;
-    existing.title = title?.trim() ?? existing.title;
-    existing.organization = organization?.trim() ?? existing.organization;
-    if (status) existing.status = status;
-    existing.startAt = startAt ?? existing.startAt;
-    existing.endAt = endAt ?? existing.endAt;
-    existing.venue = venue?.trim() ?? existing.venue;
-    existing.locationUrl = locationUrl?.trim() ?? existing.locationUrl;
-    existing.posterImg = newPosterRel;
-
-    const saved = await existing.save();
-
-    if (oldPosterAbs) safeUnlink(oldPosterAbs);
-
-    res.json(saved);
+    const updated = await Campaign.findByIdAndUpdate(id, updates, { new: true });
+    return res.json({ message: "Campaign updated", data: updated });
   } catch (err) {
-    if (req.file?.path) safeUnlink(req.file.path);
-    next(err);
+    console.error("updateCampaign error:", err);
+    return res.status(500).json({ message: "Internal server error", error: err.message });
   }
-}
+};
 
-/* -------------------- delete -------------------- */
-export async function deleteCampaign(req, res, next) {
-  try {
-    const existing = await Campaign.findById(req.params.id);
-    if (!existing) return res.status(404).json({ message: "Campaign not found" });
-
-    const posterAbs = existing.posterImg
-      ? path.resolve(process.cwd(), existing.posterImg)
-      : null;
-
-    await existing.deleteOne();
-
-    safeUnlink(posterAbs);
-
-    res.json({ message: "Campaign deleted" });
-  } catch (err) {
-    next(err);
-  }
-}
-
-export async function patchCampaign(req, res, next) {
+export const deleteCampaign = async (req, res) => {
   try {
     const { id } = req.params;
+    if (!mongoose.isValidObjectId(id)) return res.status(400).json({ message: "Invalid id" });
 
-    // Only pick safe fields you want to allow via patch:
-    const allowed = ["hospitalName", "title", "organization", "status", "startAt", "endAt", "venue", "locationUrl"];
-    const update = {};
-    for (const k of allowed) {
-      if (req.body[k] !== undefined && req.body[k] !== null && req.body[k] !== "") {
-        update[k] = req.body[k];
-      }
+    const existing = await Campaign.findById(id);
+    if (!existing) return res.status(404).json({ message: "Not found" });
+
+    if (existing.posterPublicId) {
+      try { await cloudinary.uploader.destroy(existing.posterPublicId); } catch (_) {}
     }
 
-    // If only updating status, no need to validate dates. If start/end provided, validate.
-    if (update.startAt || update.endAt) {
-      const existing = await Campaign.findById(id);
-      if (!existing) return res.status(404).json({ message: "Campaign not found" });
-      const start = update.startAt ?? existing.startAt;
-      const end = update.endAt ?? existing.endAt;
-      assertDates(start, end);
-    }
-
-    const saved = await Campaign.findByIdAndUpdate(id, update, {
-      new: true,
-      runValidators: true,
-    });
-    if (!saved) return res.status(404).json({ message: "Campaign not found" });
-
-    res.json(saved);
+    await Campaign.findByIdAndDelete(id);
+    return res.json({ message: "Campaign deleted" });
   } catch (err) {
-    next(err);
+    console.error("deleteCampaign error:", err);
+    return res.status(500).json({ message: "Internal server error", error: err.message });
   }
-}
+};
