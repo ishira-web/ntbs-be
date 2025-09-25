@@ -18,7 +18,7 @@ import authRouter from "./routes/authLogin.js";
 import campRouter from "./routes/Campaings.router.js";
 import requestRouter from "./routes/Request.router.js";
 import appointmentRouter from "./routes/Appoinment.router.js";
-
+import blogRouter from "./routes/blog.routes.js";
 dotenv.config();
 
 const __filename = fileURLToPath(import.meta.url);
@@ -72,7 +72,7 @@ app.use("/api", authRouter);
 app.use("/api/camps", campRouter); // POST/PUT in this router must use multer.single('poster')
 app.use("/api/requests", requestRouter);
 app.use("/api/appointments", appointmentRouter);
-
+app.use("/api/blogs", blogRouter);
 /* ---------- 404 handler ---------- */
 app.use((req, res, next) => {
   if (res.headersSent) return next();
