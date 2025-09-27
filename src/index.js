@@ -19,6 +19,8 @@ import campRouter from "./routes/Campaings.router.js";
 import requestRouter from "./routes/Request.router.js";
 import appointmentRouter from "./routes/Appoinment.router.js";
 import blogRouter from "./routes/blog.routes.js";
+
+import AssistantRouter from "./routes/assistant.router.js";
 dotenv.config();
 
 const __filename = fileURLToPath(import.meta.url);
@@ -73,6 +75,8 @@ app.use("/api/camps", campRouter); // POST/PUT in this router must use multer.si
 app.use("/api/requests", requestRouter);
 app.use("/api/appointments", appointmentRouter);
 app.use("/api/blogs", blogRouter);
+app.use("/api/assistant", AssistantRouter);
+app.get("/health", (_, res) => res.json({ ok: true }));
 /* ---------- 404 handler ---------- */
 app.use((req, res, next) => {
   if (res.headersSent) return next();
@@ -114,3 +118,4 @@ app.use((err, req, res, _next) => {
     process.exit(1);
   }
 })();
+
