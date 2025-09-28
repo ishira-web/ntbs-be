@@ -13,11 +13,6 @@ function baseHeaders() {
   };
 }
 
-/** -------------------------------------------------------
- *  SIMPLE DOMAIN GUARD (health-only)
- *  - broad keyword net incl. synonyms & common misspellings
- *  - checks the latest user message only
- * ------------------------------------------------------ */
 const HEALTH_KEYWORDS = [
   // general
   "health","healthy","wellness","medical","medicine","clinical","clinic","hospital","nurse","doctor","physician",
@@ -56,6 +51,8 @@ const REFUSAL_MESSAGE =
 
 export async function chatWithAssistant(req, res) {
   try {
+    console.log("🔑 Using API key:", process.env.OPENROUTER_API_KEY ? "loaded" : "missing");
+
     const {
       messages = [],
       temperature = 0.3,
@@ -66,13 +63,10 @@ export async function chatWithAssistant(req, res) {
     if (!Array.isArray(messages) || messages.length === 0) {
       return res.status(400).json({ error: "messages[] is required" });
     }
-
     const lastUserMsg = [...messages].reverse().find(m => m?.role === "user")?.content || "";
 
-    // Guardrail: block non-health topics with a friendly redirect
     if (!isHealthTopic(lastUserMsg)) {
       if (stream) {
-        // Send a minimal OpenAI-style SSE stream with one delta so your frontend shows it nicely
         res.setHeader("Content-Type", "text/event-stream");
         res.setHeader("Cache-Control", "no-cache");
         res.setHeader("Connection", "keep-alive");
@@ -104,7 +98,7 @@ export async function chatWithAssistant(req, res) {
         stream
       }),
     });
-
+    
     if (!stream) {
       const data = await r.json();
       return res.status(r.ok ? 200 : 500).json(data);
